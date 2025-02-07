@@ -38,12 +38,129 @@ use std::io::{self, BufRead, Read, Seek, SeekFrom, Write};
 
 pub use crate::Either::{Left, Right};
 
-/// The enum `Either` with variants `Left` and `Right` is a general purpose
+/// The enum [`Either`] with variants [`Left`] and [`Right`] is a general purpose
 /// sum type with two cases.
 ///
 /// The `Either` type is symmetric and treats its variants the same way, without
 /// preference.
-/// (For representing success or error, use the regular `Result` enum instead.)
+/// (For representing success or error, use the regular [`Result`] enum instead.)
+///
+/// The main use case for `Either` is to combine two possibly different types
+/// implementing the same trait without resorting to dynamic dispatch.
+///
+/// # Examples
+///
+/// ```
+/// use either::Either;
+///
+/// // `Either` can hold two different types.
+/// fn write_to_something(dest: &str) -> Either<File, TcpStream> {
+///     if let Some(path) = dest.strip_prefix("file:") {
+///         Either::Left(File::create(path).unwrap())
+///     } else if let Some(host) = dest.strip_prefix("tcp:") {
+///         Either::Right(TcpStream::connect(host).unwrap())
+///     } else {
+///         panic!("unknown destination: {}", dest);
+///     }
+/// }
+///
+/// // Can return `impl Iterator` without exposing `Either` in the signature.
+/// fn get_lines(filter: bool) -> impl Iterator<Item = String> {
+///     use either::{Left, Right};
+///     // The iterators have different types.
+///     if filter {
+///         Left(LINES.iter().filter(|line| line.len() < 80).map(|&s| s.to_owned()))
+///     } else {
+///         Right(LINES.iter().map(|&s| s.to_owned()))
+///     }
+/// }
+///
+/// fn main() {
+///     use std::io::Write;
+///
+///     let mut writer = write_to_something(&env::var("DEST").unwrap());
+///
+///     let lines = get_lines(rand::random());
+///     // Use it like a normal iterator.
+///     for line in lines {
+///         // Both `File` and `TcpStream` implement `Write`.
+///         write!(writer, "{}", line).unwrap();
+///     }
+///
+///     let lines = get_lines(rand::random());
+///     // Use internal iteration to avoid branching on `Either`'s
+///     // variants for every `.next()` call.
+///     lines.for_each(|line| {
+///         writeln!(writer, "{}", line).unwrap();
+///     })
+/// }
+///
+/// # mod env {
+/// #     pub fn var(_: &str) -> Result<String, ()> { Ok("file:/tmp/foo".to_owned()) }
+/// # }
+/// #
+/// # mod rand {
+/// #     pub fn random() -> bool { true }
+/// # }
+/// #
+/// # const LINES: &[&str] = &[];
+/// #
+/// # struct File;
+/// # impl File {
+/// #     fn create(_: &str) -> Result<File, ()> { Ok(File) }
+/// # }
+/// #
+/// # impl std::io::Write for File {
+/// #     fn write(&mut self, _: &[u8]) -> std::io::Result<usize> { Ok(0) }
+/// #     fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+/// # }
+/// #
+/// # struct TcpStream;
+/// # impl TcpStream {
+/// #     fn connect(_: &str) -> Result<TcpStream, ()> { Ok(TcpStream) }
+/// # }
+/// #
+/// # impl std::io::Write for TcpStream {
+/// #     fn write(&mut self, _: &[u8]) -> std::io::Result<usize> { Ok(0) }
+/// #     fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+/// # }
+/// ```
+///
+/// # Implemented traits
+///
+/// All traits delegate methods to either the `Left` or `Right` variant
+/// and are implemented if both variants implement them.
+///
+/// - [`Clone`](Either::clone), [`Copy`]
+/// - [`PartialEq`], [`Eq`]
+/// - [`PartialOrd`](Either::partial_cmp), [`Ord`](Either::cmp)
+/// - [`Hash`](std::hash::Hash)
+/// - [`Debug`](std::fmt::Debug), [`Display`](std::fmt::Display)
+/// - `std::io` traits
+///     - [`Read`](Either::read)
+///     - [`Write`](Either::write)
+///     - [`Seek`](Either::seek)
+///     - [`BufRead`](Either::fill_buf)
+/// - [`Future`](Either::poll)
+/// - [`AsRef<T>`], [`AsMut<T>`]
+/// - [`Deref`](Either::deref), [`DerefMut`](Either::deref_mut)
+/// - [`Into<Result<R, L>>`], [`From<Result<L, R>>`]
+/// - [`Error`](Either::source)
+/// - [`Extend`](Either::extend)
+/// - [`Iterator`] if both variants have the same [`Item`](Iterator::Item) type.
+///     - [`Iterator`](Either::next)
+///     - [`DoubleEndedIterator`](Either::next_back)
+///     - [`ExactSizeIterator`](Either::len)
+///     - [`FusedIterator`](std::iter::FusedIterator)
+/// - Methods for getting [`Iterator`]s for *the same* [`Item`](Iterator::Item) type.
+///     - [`into_iter`](Either::into_iter)
+///     - [`iter`](Either::iter)
+///     - [`iter_mut`](Either::iter_mut)
+/// - Methods for getting [`Iterator`]s for *different* [`Item`](Iterator::Item) types.
+///     - [`factor_into_iter`](Either::factor_into_iter)
+///     - [`factor_iter`](Either::factor_iter)
+///     - [`factor_iter_mut`](Either::factor_iter_mut)
+///
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub enum Either<L, R> {
@@ -605,10 +722,9 @@ impl<L, R> Either<L, R> {
     /// use either::*;
     /// let left: Either<_, Vec<u8>> = Left(&["hello"]);
     /// assert_eq!(left.factor_into_iter().next(), Some(Left(&"hello")));
-
+    ///
     /// let right: Either<&[&str], _> = Right(vec![0, 1]);
     /// assert_eq!(right.factor_into_iter().collect::<Vec<_>>(), vec![Right(0), Right(1)]);
-    ///
     /// ```
     // TODO(MSRV): doc(alias) was stabilized in Rust 1.48
     // #[doc(alias = "transpose")]
@@ -629,7 +745,7 @@ impl<L, R> Either<L, R> {
     /// use either::*;
     /// let left: Either<_, Vec<u8>> = Left(["hello"]);
     /// assert_eq!(left.factor_iter().next(), Some(Left(&"hello")));
-
+    ///
     /// let right: Either<[&str; 2], _> = Right(vec![0, 1]);
     /// assert_eq!(right.factor_iter().collect::<Vec<_>>(), vec![Right(&0), Right(&1)]);
     ///
@@ -654,7 +770,7 @@ impl<L, R> Either<L, R> {
     /// let mut left: Either<_, Vec<u8>> = Left(["hello"]);
     /// left.factor_iter_mut().for_each(|x| *x.unwrap_left() = "goodbye");
     /// assert_eq!(left, Left(["goodbye"]));
-
+    ///
     /// let mut right: Either<[&str; 2], _> = Right(vec![0, 1, 2]);
     /// right.factor_iter_mut().for_each(|x| if let Right(r) = x { *r = -*r; });
     /// assert_eq!(right, Right(vec![0, -1, -2]));
